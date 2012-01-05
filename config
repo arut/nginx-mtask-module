@@ -6,3 +6,5 @@ HTTP_MODULES="$HTTP_MODULES \
 NGX_ADDON_SRCS="$NGX_ADDON_SRCS \
 		$ngx_addon_dir/ngx_http_mtask_module.c"
 
+CORE_LIBS="$CORE_LIBS -ldl"
+

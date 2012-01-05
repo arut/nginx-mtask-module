@@ -1,30 +1,28 @@
-/****************************************************************************
-Copyright (c) 2011, Roman Arutyunyan (arut@qip.ru)
+/******************************************************************************
+Copyright (c) 2011-2012, Roman Arutyunyan (arut@qip.ru)
 All rights reserved.
 
-Redistribution and use in source and binary forms, with or without
-modification, are permitted provided that the following conditions are met:
-    * Redistributions of source code must retain the above copyright
-      notice, this list of conditions and the following disclaimer.
-    * Redistributions in binary form must reproduce the above copyright
-      notice, this list of conditions and the following disclaimer in the
-      documentation and/or other materials provided with the distribution.
-    * Neither the name of the <organization> nor the
-      names of its contributors may be used to endorse or promote products
-      derived from this software without specific prior written permission.
+Redistribution and use in source and binary forms, with or without modification, 
+are permitted provided that the following conditions are met:
 
-THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND
-ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
-WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
-DISCLAIMED. IN NO EVENT SHALL <COPYRIGHT HOLDER> BE LIABLE FOR ANY
-DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES
-(INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
-LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND
-ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
-(INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
-SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
-   
-*****************************************************************************/
+   1. Redistributions of source code must retain the above copyright notice, 
+      this list of conditions and the following disclaimer.
+
+   2. Redistributions in binary form must reproduce the above copyright notice, 
+      this list of conditions and the following disclaimer in the documentation
+	  and/or other materials provided with the distribution.
+
+THIS SOFTWARE IS PROVIDED BY THE AUTHOR ''AS IS'' AND ANY EXPRESS OR IMPLIED
+WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF 
+MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT 
+SHALL THE AUTHOR OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
+SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, 
+PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR 
+BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN 
+CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING 
+IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY 
+OF SUCH DAMAGE.
+*******************************************************************************/
 
 /*
  NGINX module providing userspace cooperative multitasking 
@@ -35,21 +33,22 @@ SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include <ngx_core.h>
 #include <ngx_http.h>
 #include <ucontext.h>
+#include <dlfcn.h>
 
-/* TODO: this should be taken from 
-   1) ulimit -s (default)
-   2) settings in nginx.conf 
- */
+/* NB: NGINX logger is greedy of stack; use > 4k for safety */
+#define MTASK_DEFAULT_STACK_SIZE 16384
 
-#define MTASK_STACK_SIZE 1024
+static char * ngx_http_mtask(ngx_conf_t *cf, ngx_command_t *cmd, void *conf);
+static void* ngx_http_mtask_create_loc_conf(ngx_conf_t *cf);
+static char* ngx_http_mtask_merge_loc_conf(ngx_conf_t *cf, void *parent, void *child);
 
-static char* ngx_http_mtask_on(ngx_conf_t *cf, ngx_command_t *cmd, void *conf);
-
-typedef void (*ngx_http_mtask_handler_pt)(ngx_http_request*);
+typedef ngx_int_t (*ngx_http_mtask_handler_pt)(ngx_http_request_t*, ngx_chain_t*);
 
 struct ngx_http_mtask_loc_conf_s {
 
 	ngx_http_mtask_handler_pt handler;
+
+	size_t stack_size;
 };
 
 typedef struct ngx_http_mtask_loc_conf_s ngx_http_mtask_loc_conf_t;
@@ -58,13 +57,6 @@ struct ngx_http_mtask_ctx_s {
 
 	/* current handler contexts: wake & return */
 	ucontext_t wctx, rctx;
-
-	/* this is not a real nginx connection
-	   rather it's a fake object to make use of nginx event dispatcher 
-	 */
-	ngx_connection_t conn;
-
-	void *stack;
 };
 
 typedef struct ngx_http_mtask_ctx_s ngx_http_mtask_ctx_t;
@@ -74,10 +66,17 @@ typedef struct ngx_http_mtask_ctx_s ngx_http_mtask_ctx_t;
 static ngx_command_t ngx_http_mtask_commands[] = {
 
 	{	ngx_string("mtask"),
-		NGX_HTTP_LOC_CONF|NGX_HTTP_LOC_CONF,
+		NGX_HTTP_LOC_CONF|NGX_HTTP_LOC_CONF|NGX_CONF_NOARGS,
 		ngx_http_mtask,
 		NGX_HTTP_LOC_CONF_OFFSET,
 		0,
+		NULL },
+
+	{	ngx_string("mtask_stack"),
+		NGX_HTTP_MAIN_CONF|NGX_HTTP_SRV_CONF|NGX_HTTP_LOC_CONF|NGX_CONF_TAKE1,
+		ngx_conf_set_size_slot,
+		NGX_HTTP_LOC_CONF_OFFSET,
+		offsetof(ngx_http_mtask_loc_conf_t, stack_size),
 		NULL },
 
 	ngx_null_command
@@ -113,17 +112,37 @@ ngx_module_t ngx_http_mtask_module = {
 	NGX_MODULE_V1_PADDING
 };
 
-void test_mtask_handler(ngx_http_request *r) {
+ngx_int_t test_mtask_handler(ngx_http_request_t *r, ngx_chain_t *out) {
 
-	ngx_chain_t out;
+	int s;
+	struct sockaddr_in addr;
+	char buf[1024];
+	ssize_t sz;
 
-	ngx_http_send_header(r);
+	s = socket(AF_INET, SOCK_STREAM, 0);
+	if (s == -1)
+		return NGX_ERROR;
 
-	out.buf = ngx_create_temp_buf(r->pool, 6);
-	memcpy(out.buf.pos, "preved", 6);
-	out.next = NULL;
-	out.buf->last_buf = 1;
-	ngx_http_output_filter(r, &out);
+	addr.sin_family = AF_INET;
+	addr.sin_port = htons(1979);
+	addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+
+	if (connect(s, &addr, sizeof(addr)) == -1)
+		return NGX_ERROR;
+
+	sz = recv(s, buf, sizeof(buf), 0);
+	if (sz == -1)
+		return NGX_ERROR;
+
+	close(s);
+
+	out->buf = ngx_create_temp_buf(r->pool, sz);
+	memcpy(out->buf->pos, buf, sz);
+	out->buf->last += sz;
+	out->next = NULL;
+	out->buf->last_buf = 1;
+
+	return NGX_OK;
 }
 
 /* The request pointer is read by intercepted functions.
@@ -144,23 +163,46 @@ static ngx_http_request_t *mtask_req;
 #define mtask_scheduled (mtask_current != NULL)
 
 
-static void mtask_start_scheduled(int pt) {
-
-	ngx_http_mtask_handler_pt hnd = pt;	
+static void mtask_start_scheduled() {
+	
+	ngx_http_mtask_loc_conf_t *mlcf;
 	ngx_http_mtask_ctx_t *ctx;
+	ngx_http_request_t *r = mtask_current;
+	ngx_chain_t out;
+	ngx_int_t res;
 
-	ctx = ngx_http_get_module_ctx(r, ngx_http_mtask_module);
+	ngx_log_debug(NGX_LOG_DEBUG_HTTP, mtask_current->connection->log, 0, 
+			"mtask start proc");
 
-	hnd(mtask_current);
+	mlcf = ngx_http_get_module_loc_conf(r, ngx_http_mtask_module);
+
+	if (mlcf->handler) {
+		res = mlcf->handler(r, &out);
+		if (res != NGX_OK)
+			r->state = NGX_ERROR;
+	} else
+		r->state = NGX_ERROR;
 
 	mtask_resetcurrent();
 
+	ngx_http_send_header(r);
+
+	ngx_http_output_filter(r, r->state == NGX_ERROR ? 0 : &out);
+
+	ctx = ngx_http_get_module_ctx(r, ngx_http_mtask_module);
+
 	setcontext(&ctx->rctx);
+
+	ngx_log_debug(NGX_LOG_DEBUG_HTTP, mtask_current->connection->log, 0, 
+			"mtask end proc");
 }
 
-static void mtask_wake(ngx_http_request *r) {
+static int mtask_wake(ngx_http_request_t *r, int finalize) {
 
 	ngx_http_mtask_ctx_t *ctx;
+
+	ngx_log_debug(NGX_LOG_DEBUG_HTTP, r->connection->log, 0, 
+			"mtask wake");
 
 	ctx = ngx_http_get_module_ctx(r, ngx_http_mtask_module);
 
@@ -170,46 +212,69 @@ static void mtask_wake(ngx_http_request *r) {
 
 	if (!mtask_scheduled) {
 
-		munmap(ctx->stack, MTASK_STACK_SIZE);
+		ngx_log_debug(NGX_LOG_DEBUG_HTTP, r->connection->log, 0, 
+			"mtask finalize");
 
-		ngx_http_finalize_request(r, NGX_OK);
+		if (finalize)
+			ngx_http_finalize_request(r, NGX_OK);
+
+		return 1;
 	}
 
 	mtask_resetcurrent();
+
+	return 0;
 }
 
 static void mtask_event_handler(ngx_event_t *ev) {
 
-	ngx_http_request *r;
+	ngx_http_request_t *r;
 	ngx_connection_t *c;
 
 	c = ev->data;
 
 	r = c->data;
 
-	ngx_epoll_del_event(ev, ev->event, 0);
+	ngx_log_debug(NGX_LOG_DEBUG_HTTP, r->connection->log, 0, 
+			"mtask event");
 
-	mtask_wake(r);
+	mtask_wake(r, 1);
 }
 
 static void mtask_yield(int fd, ngx_int_t event) {
 
 	ngx_http_mtask_ctx_t *ctx;
-	ngx_event_t evt;
+	ngx_connection_t *c;
+	ngx_event_t *e;
+
+	ngx_log_debug(NGX_LOG_DEBUG_HTTP, mtask_current->connection->log, 0, 
+			"mtask yield '%V' (%s)", 
+			&mtask_current->uri,
+			event & NGX_WRITE_EVENT ? "write" : "read");
 
 	ctx = ngx_http_get_module_ctx(mtask_current, ngx_http_mtask_module);
 
-	memset(&evt, 0, sizeof(evt));
+	c = ngx_get_connection(fd, mtask_current->connection->log);
 
-	ctx->conn.fd = fd;
+	c->data = mtask_current;
 
-	evt.data = &ctx->conn;
-	evt.handler = &mtask_event_handler;
+	if (event == NGX_READ_EVENT)
+		e = c->read;
+	else
+		e = c->write;
+
+	e->data = c;
+	e->handler = &mtask_event_handler;
+	e->log = mtask_current->connection->log;
 
 	/*TODO: set timeout*/
-	ngx_add_event(&evt, event, 0);
+	ngx_add_event(e, event, 0);
 
 	swapcontext(&ctx->wctx, &ctx->rctx);
+
+	ngx_del_event(e, event, 0);
+
+	ngx_free_connection(c);
 }
 
 /* main request handler */
@@ -224,33 +289,34 @@ static ngx_int_t ngx_http_mtask_handler(ngx_http_request_t *r)
 	if (ctx == NULL)
 		return NGX_HTTP_INTERNAL_SERVER_ERROR;
 
-	ctx->conn.data = r;
-	ctx->conn.read = &mtask_event;
-	ctx->conn.write = &mtask_event;
-
 	ngx_http_set_ctx(r, ctx, ngx_http_mtask_module);
 
 	if (mlcf->handler == NULL)
 		return NGX_ERROR;
 
-	ctx->stack = mmap(0, MTASK_STACK_SIZE, 
-			PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, 0, 0);
-
-	if (stack == MAP_FAILED)
-		return NGX_ERROR;
-
 	getcontext(&ctx->wctx);
-	ctx->wctx.uc_stack.ss_sp = ctx->stack;
-	ctx->wctx.uc_stack.ss_size = MTASK_STACK_SIZE;
+	ctx->wctx.uc_stack.ss_sp = ngx_palloc(r->pool, mlcf->stack_size);
+	ctx->wctx.uc_stack.ss_size = mlcf->stack_size;
 	ctx->wctx.uc_stack.ss_flags = 0;
 	ctx->wctx.uc_link = NULL;
 
-	makecontext(&ctx->wctx, (void (*)())mtask_start_scheduled, 
-			1, (int)mlcf->handler);
+	makecontext(&ctx->wctx, &mtask_start_scheduled, 0);
 
 	r->main->count++;
 
-	mtask_wake(r);
+	ngx_log_debug(NGX_LOG_DEBUG_HTTP, r->connection->log, 0, 
+			"mtask init");
+
+	if (mtask_wake(r, 0)) {
+
+		ngx_log_debug(NGX_LOG_DEBUG_HTTP, r->connection->log, 0, 
+			"mtask fast result");
+
+		return NGX_OK;
+	}
+
+	ngx_log_debug(NGX_LOG_DEBUG_HTTP, r->connection->log, 0, 
+			"mtask detach");
 
 	return NGX_DONE;
 }
@@ -315,7 +381,7 @@ int connect(int sockfd, const struct sockaddr *addr, socklen_t addrlen) {
 
 		flags = 0;
 
-		ret = getsockopt(SOL_SOCKET, SO_ERROR, &flags, &len);
+		ret = getsockopt(sockfd, SOL_SOCKET, SO_ERROR, &flags, &len);
 
 		if (ret == -1 || !len)
 			return -1;
@@ -370,7 +436,7 @@ ssize_t write(int fd, const void *buf, size_t count) {
 
 
 typedef ssize_t (*recv_pt)(int sockfd, void *buf, size_t len, int flags);
-static recv_pr orig_recv;
+static recv_pt orig_recv;
 
 ssize_t recv(int sockfd, void *buf, size_t len, int flags) {
 
@@ -406,10 +472,12 @@ ssize_t send(int sockfd, const void *buf, size_t len, int flags) {
 	}
 }
 
+/* TODO: handle close() */
+/* TODO: handle poll/epoll/select */
 
 __attribute__((constructor)) static void __init_scheduler() {
 
-#define INIT_SYSCALL(name) orig_##name = (name##_pt*)dlsym(RTLD_NEXT, #name)
+#define INIT_SYSCALL(name) orig_##name = (name##_pt)dlsym(RTLD_NEXT, #name)
 
 	INIT_SYSCALL(accept);
 	INIT_SYSCALL(connect);
@@ -422,21 +490,24 @@ __attribute__((constructor)) static void __init_scheduler() {
 
 }
 
-/* TODO: handle poll/epoll/select */
-
 static void* ngx_http_mtask_create_loc_conf(ngx_conf_t *cf)
 {
 	ngx_http_mtask_loc_conf_t *conf = ngx_pcalloc(cf->pool, sizeof(ngx_http_mtask_loc_conf_t));
+
+	conf->stack_size = NGX_CONF_UNSET_SIZE;
 
 	return conf;
 }
 
 static char* ngx_http_mtask_merge_loc_conf(ngx_conf_t *cf, void *parent, void *child)
 {
-/*
 	ngx_http_mtask_loc_conf_t *prev = parent;
 	ngx_http_mtask_loc_conf_t *conf = child;
-*/
+
+	ngx_conf_merge_size_value(conf->stack_size,
+			prev->stack_size,
+			(size_t) MTASK_DEFAULT_STACK_SIZE);
+
 	return NGX_CONF_OK;
 }
 
