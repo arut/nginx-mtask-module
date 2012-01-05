@@ -38,6 +38,8 @@ OF SUCH DAMAGE.
 /* NB: NGINX logger is greedy of stack; use > 4k for safety */
 #define MTASK_DEFAULT_STACK_SIZE 16384
 
+#define MTASK_DEFAULT_TIMEOUT 10000
+
 static char * ngx_http_mtask(ngx_conf_t *cf, ngx_command_t *cmd, void *conf);
 static void* ngx_http_mtask_create_loc_conf(ngx_conf_t *cf);
 static char* ngx_http_mtask_merge_loc_conf(ngx_conf_t *cf, void *parent, void *child);
@@ -49,6 +51,8 @@ struct ngx_http_mtask_loc_conf_s {
 	ngx_http_mtask_handler_pt handler;
 
 	size_t stack_size;
+
+	ngx_msec_t timeout;
 };
 
 typedef struct ngx_http_mtask_loc_conf_s ngx_http_mtask_loc_conf_t;
@@ -57,6 +61,8 @@ struct ngx_http_mtask_ctx_s {
 
 	/* current handler contexts: wake & return */
 	ucontext_t wctx, rctx;
+
+	int timedout;
 };
 
 typedef struct ngx_http_mtask_ctx_s ngx_http_mtask_ctx_t;
@@ -77,6 +83,13 @@ static ngx_command_t ngx_http_mtask_commands[] = {
 		ngx_conf_set_size_slot,
 		NGX_HTTP_LOC_CONF_OFFSET,
 		offsetof(ngx_http_mtask_loc_conf_t, stack_size),
+		NULL },
+
+	{   ngx_string("mtask_timeout"),
+		NGX_HTTP_MAIN_CONF|NGX_HTTP_SRV_CONF|NGX_HTTP_LOC_CONF|NGX_CONF_TAKE1,
+		ngx_conf_set_msec_slot,
+		NGX_HTTP_LOC_CONF_OFFSET,
+		offsetof(ngx_http_mtask_loc_conf_t, timeout),
 		NULL },
 
 	ngx_null_command
@@ -119,6 +132,17 @@ ngx_int_t test_mtask_handler(ngx_http_request_t *r, ngx_chain_t *out) {
 	char buf[1024];
 	ssize_t sz;
 
+#if 0
+	strcpy(buf, "fast result");
+	sz = strlen(buf);
+	out->buf = ngx_create_temp_buf(r->pool, sz);
+	memcpy(out->buf->pos, buf, sz);
+	out->buf->last += sz;
+	out->next = NULL;
+	out->buf->last_buf = 1;
+	return NGX_OK;
+#endif
+
 	s = socket(AF_INET, SOCK_STREAM, 0);
 	if (s == -1)
 		return NGX_ERROR;
@@ -127,12 +151,18 @@ ngx_int_t test_mtask_handler(ngx_http_request_t *r, ngx_chain_t *out) {
 	addr.sin_port = htons(1979);
 	addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
 
-	if (connect(s, &addr, sizeof(addr)) == -1)
+	if (connect(s, &addr, sizeof(addr)) == -1) {
+		ngx_log_debug(NGX_LOG_DEBUG_HTTP, r->connection->log, 0, 
+			"mtask test connect() failed");
 		return NGX_ERROR;
+	}
 
 	sz = recv(s, buf, sizeof(buf), 0);
-	if (sz == -1)
+	if (sz == -1) {
+		ngx_log_debug(NGX_LOG_DEBUG_HTTP, r->connection->log, 0, 
+			"mtask test recv() failed");
 		return NGX_ERROR;
+	}
 
 	close(s);
 
@@ -144,6 +174,11 @@ ngx_int_t test_mtask_handler(ngx_http_request_t *r, ngx_chain_t *out) {
 
 	return NGX_OK;
 }
+
+
+#define MTASK_WAKE_TIMEDOUT 0x01
+#define MTASK_WAKE_NOFINALIZE 0x02
+
 
 /* The request pointer is read by intercepted functions.
    If non-NULL then control is yielded to caller context
@@ -176,18 +211,22 @@ static void mtask_start_scheduled() {
 
 	mlcf = ngx_http_get_module_loc_conf(r, ngx_http_mtask_module);
 
-	if (mlcf->handler) {
-		res = mlcf->handler(r, &out);
-		if (res != NGX_OK)
-			r->state = NGX_ERROR;
-	} else
-		r->state = NGX_ERROR;
+	if (mlcf->handler == NULL
+			|| mlcf->handler(r, &out) != NGX_OK)
+	{
+		r->err_status = NGX_HTTP_INTERNAL_SERVER_ERROR;
+		out.buf = ngx_create_temp_buf(r->pool, 1);
+		*out.buf->pos = '\n';
+		out.buf->last++;
+		out.next = NULL;
+		out.buf->last_buf = 1;
+	}
 
 	mtask_resetcurrent();
 
 	ngx_http_send_header(r);
 
-	ngx_http_output_filter(r, r->state == NGX_ERROR ? 0 : &out);
+	ngx_http_output_filter(r, &out);
 
 	ctx = ngx_http_get_module_ctx(r, ngx_http_mtask_module);
 
@@ -197,7 +236,7 @@ static void mtask_start_scheduled() {
 			"mtask end proc");
 }
 
-static int mtask_wake(ngx_http_request_t *r, int finalize) {
+static int mtask_wake(ngx_http_request_t *r, int flags) {
 
 	ngx_http_mtask_ctx_t *ctx;
 
@@ -208,6 +247,9 @@ static int mtask_wake(ngx_http_request_t *r, int finalize) {
 
 	mtask_setcurrent(r);
 
+	if (flags & MTASK_WAKE_TIMEDOUT)
+		ctx->timedout = 1;
+
 	swapcontext(&ctx->rctx, &ctx->wctx);
 
 	if (!mtask_scheduled) {
@@ -215,7 +257,7 @@ static int mtask_wake(ngx_http_request_t *r, int finalize) {
 		ngx_log_debug(NGX_LOG_DEBUG_HTTP, r->connection->log, 0, 
 			"mtask finalize");
 
-		if (finalize)
+		if (!(flags & MTASK_WAKE_NOFINALIZE))
 			ngx_http_finalize_request(r, NGX_OK);
 
 		return 1;
@@ -230,6 +272,7 @@ static void mtask_event_handler(ngx_event_t *ev) {
 
 	ngx_http_request_t *r;
 	ngx_connection_t *c;
+	int wf = 0;
 
 	c = ev->data;
 
@@ -238,14 +281,21 @@ static void mtask_event_handler(ngx_event_t *ev) {
 	ngx_log_debug(NGX_LOG_DEBUG_HTTP, r->connection->log, 0, 
 			"mtask event");
 
-	mtask_wake(r, 1);
+	if (ev->timedout)
+		wf |= MTASK_WAKE_TIMEDOUT;
+
+	mtask_wake(r, wf);
 }
 
-static void mtask_yield(int fd, ngx_int_t event) {
+/* returns 1 on timeout */
+static int mtask_yield(int fd, ngx_int_t event) {
 
 	ngx_http_mtask_ctx_t *ctx;
 	ngx_connection_t *c;
 	ngx_event_t *e;
+	ngx_http_mtask_loc_conf_t *mlcf;
+
+	mlcf = ngx_http_get_module_loc_conf(mtask_current, ngx_http_mtask_module);
 
 	ngx_log_debug(NGX_LOG_DEBUG_HTTP, mtask_current->connection->log, 0, 
 			"mtask yield '%V' (%s)", 
@@ -267,14 +317,23 @@ static void mtask_yield(int fd, ngx_int_t event) {
 	e->handler = &mtask_event_handler;
 	e->log = mtask_current->connection->log;
 
-	/*TODO: set timeout*/
 	ngx_add_event(e, event, 0);
 
+	if (mlcf->timeout)
+		ngx_add_timer(e, mlcf->timeout);
+
+	ctx->timedout = 0;
+
 	swapcontext(&ctx->wctx, &ctx->rctx);
+
+	if (mlcf->timeout)
+		ngx_del_timer(e);
 
 	ngx_del_event(e, event, 0);
 
 	ngx_free_connection(c);
+
+	return ctx->timedout;
 }
 
 /* main request handler */
@@ -307,7 +366,7 @@ static ngx_int_t ngx_http_mtask_handler(ngx_http_request_t *r)
 	ngx_log_debug(NGX_LOG_DEBUG_HTTP, r->connection->log, 0, 
 			"mtask init");
 
-	if (mtask_wake(r, 0)) {
+	if (mtask_wake(r, MTASK_WAKE_NOFINALIZE)) {
 
 		ngx_log_debug(NGX_LOG_DEBUG_HTTP, r->connection->log, 0, 
 			"mtask fast result");
@@ -346,7 +405,11 @@ int accept(int sockfd, struct sockaddr *addr, socklen_t *addrlen) {
 		if (!mtask_scheduled || ret != -1 || errno != EAGAIN)
 			return ret;
 
-		mtask_yield(sockfd, NGX_READ_EVENT);
+		if (mtask_yield(sockfd, NGX_READ_EVENT)) {
+			/* timeout */
+			errno = EINVAL;
+			return -1;
+		}
 	}
 }
 
@@ -375,7 +438,10 @@ int connect(int sockfd, const struct sockaddr *addr, socklen_t addrlen) {
 
 	for(;;) {
 
-		mtask_yield(sockfd, NGX_WRITE_EVENT);
+		if (mtask_yield(sockfd, NGX_WRITE_EVENT)) {
+			errno = ETIMEDOUT;
+			return -1;
+		}
 
 		len = sizeof(flags);
 
@@ -411,7 +477,10 @@ ssize_t read(int fd, void *buf, size_t count) {
 		if (!mtask_scheduled || ret != -1 || errno != EAGAIN)
 			return ret;
 
-		mtask_yield(fd, NGX_READ_EVENT);
+		if (mtask_yield(fd, NGX_READ_EVENT)) {
+			errno = ECONNREFUSED;
+			return -1;
+		}
 	}
 }
 
@@ -430,7 +499,10 @@ ssize_t write(int fd, const void *buf, size_t count) {
 		if (!mtask_scheduled || ret != -1 || errno != EAGAIN)
 			return ret;
 
-		mtask_yield(fd, NGX_WRITE_EVENT);
+		if (mtask_yield(fd, NGX_WRITE_EVENT)) {
+			errno = ECONNRESET;
+			return -1;
+		}
 	}
 }
 
@@ -449,7 +521,10 @@ ssize_t recv(int sockfd, void *buf, size_t len, int flags) {
 		if (!mtask_scheduled || ret != -1 || errno != EAGAIN)
 			return ret;
 
-		mtask_yield(sockfd, NGX_READ_EVENT);
+		if (mtask_yield(sockfd, NGX_READ_EVENT)) {
+			errno = ECONNRESET;
+			return -1;
+		}
 	}
 }
 
@@ -468,11 +543,13 @@ ssize_t send(int sockfd, const void *buf, size_t len, int flags) {
 		if (!mtask_scheduled || ret != -1 || errno != EAGAIN)
 			return ret;
 
-		mtask_yield(sockfd, NGX_WRITE_EVENT);
+		if (mtask_yield(sockfd, NGX_WRITE_EVENT)) {
+			errno = ECONNREFUSED;
+			return -1;
+		}
 	}
 }
 
-/* TODO: handle close() */
 /* TODO: handle poll/epoll/select */
 
 __attribute__((constructor)) static void __init_scheduler() {
@@ -496,6 +573,8 @@ static void* ngx_http_mtask_create_loc_conf(ngx_conf_t *cf)
 
 	conf->stack_size = NGX_CONF_UNSET_SIZE;
 
+	conf->timeout = NGX_CONF_UNSET_MSEC;
+
 	return conf;
 }
 
@@ -507,6 +586,11 @@ static char* ngx_http_mtask_merge_loc_conf(ngx_conf_t *cf, void *parent, void *c
 	ngx_conf_merge_size_value(conf->stack_size,
 			prev->stack_size,
 			(size_t) MTASK_DEFAULT_STACK_SIZE);
+
+	ngx_conf_merge_msec_value(conf->timeout,
+			prev->timeout, 
+			MTASK_DEFAULT_TIMEOUT);
+
 
 	return NGX_CONF_OK;
 }
