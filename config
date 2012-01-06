@@ -8,3 +8,5 @@ NGX_ADDON_SRCS="$NGX_ADDON_SRCS \
 
 CORE_LIBS="$CORE_LIBS -ldl"
 
+CFLAGS="$CFLAGS -I$ngx_addon_dir"
+
