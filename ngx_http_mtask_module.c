@@ -34,6 +34,7 @@ OF SUCH DAMAGE.
 #include <ngx_http.h>
 #include <ucontext.h>
 #include <dlfcn.h>
+#include <poll.h>
 
 #include "ngx_http_mtask_module.h"
 
@@ -42,7 +43,6 @@ OF SUCH DAMAGE.
 
 #define MTASK_DEFAULT_TIMEOUT 10000
 
-/*static char * ngx_http_mtask(ngx_conf_t *cf, ngx_command_t *cmd, void *conf);*/
 static ngx_int_t ngx_http_mtask_init(ngx_conf_t *cf);
 static void* ngx_http_mtask_create_loc_conf(ngx_conf_t *cf);
 static char* ngx_http_mtask_merge_loc_conf(ngx_conf_t *cf, void *parent, void *child);
@@ -487,7 +487,17 @@ ssize_t send(int sockfd, const void *buf, size_t len, int flags) {
 	}
 }
 
-/* TODO: handle poll/epoll/select */
+typedef int (*poll_pt)(struct pollfd *fds, nfds_t nfds, int timeout);
+static poll_pt orig_poll;
+
+int poll(struct pollfd *fds, nfds_t nfds, int timeout) {
+
+	return mtask_scheduled
+		? nfds /* always ready! */
+		: orig_poll(fds, nfds, timeout);
+}
+
+/* TODO: check for fcntl() removing O_NONBLOCK flag */
 
 __attribute__((constructor)) static void __init_scheduler() {
 
@@ -499,6 +509,7 @@ __attribute__((constructor)) static void __init_scheduler() {
 	INIT_SYSCALL(write);
 	INIT_SYSCALL(recv);
 	INIT_SYSCALL(send);
+	INIT_SYSCALL(poll);
 
 #undef INIT_SYSCALL
 
