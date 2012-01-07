@@ -136,7 +136,6 @@ static void mtask_start_scheduled() {
 	ngx_http_mtask_ctx_t *ctx;
 	ngx_http_request_t *r = mtask_current;
 	ngx_chain_t out;
-	ngx_int_t res;
 
 	ngx_log_debug(NGX_LOG_DEBUG_HTTP, mtask_current->connection->log, 0, 
 			"mtask start proc");
@@ -493,7 +492,7 @@ static poll_pt orig_poll;
 int poll(struct pollfd *fds, nfds_t nfds, int timeout) {
 
 	return mtask_scheduled
-		? nfds /* always ready! */
+		? (int)nfds /* always ready! */
 		: orig_poll(fds, nfds, timeout);
 }
 
