@@ -68,7 +68,7 @@ static ngx_command_t ngx_http_mtask_commands[] = {
 		offsetof(ngx_http_mtask_loc_conf_t, stack_size),
 		NULL },
 
-	{   ngx_string("mtask_timeout"),
+	{	ngx_string("mtask_timeout"),
 		NGX_HTTP_MAIN_CONF|NGX_HTTP_SRV_CONF|NGX_HTTP_LOC_CONF|NGX_CONF_TAKE1,
 		ngx_conf_set_msec_slot,
 		NGX_HTTP_LOC_CONF_OFFSET,
@@ -108,7 +108,7 @@ ngx_module_t ngx_http_mtask_module = {
 	NGX_MODULE_V1_PADDING
 };
 
-#define MTASK_WAKE_TIMEDOUT 0x01
+#define MTASK_WAKE_TIMEDOUT   0x01
 #define MTASK_WAKE_NOFINALIZE 0x02
 
 
@@ -161,10 +161,10 @@ static void mtask_start_scheduled() {
 
 	ctx = ngx_http_get_module_ctx(r, ngx_http_mtask_module);
 
-	setcontext(&ctx->rctx);
-
 	ngx_log_debug(NGX_LOG_DEBUG_HTTP, mtask_current->connection->log, 0, 
 			"mtask end proc");
+
+	setcontext(&ctx->rctx);
 }
 
 static int mtask_wake(ngx_http_request_t *r, int flags) {
