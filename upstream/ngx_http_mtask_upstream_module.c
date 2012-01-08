@@ -25,23 +25,31 @@ OF SUCH DAMAGE.
 *******************************************************************************/
 
 /*
-   Example of using nginx-mtask-module: upstream module
+   Example of using nginx-mtask-module: TCP-to-HTTP upstream module
 */
 
 #include <ngx_config.h>
 #include <ngx_core.h>
 #include <ngx_http.h>
+#include <ctype.h>
 
 #include <ngx_http_mtask_module.h>
 
 static char * ngx_http_mtask_upstream(ngx_conf_t *cf, ngx_command_t *cmd, void *conf);
+static void* ngx_http_mtask_upstream_create_loc_conf(ngx_conf_t *cf);
+static char* ngx_http_mtask_upstream_merge_loc_conf(ngx_conf_t *cf, void *parent, void *child);
+
+struct ngx_http_mtask_upstream_loc_conf_s {
+
+	struct sockaddr_in addr;
+};
+
+typedef struct ngx_http_mtask_upstream_loc_conf_s ngx_http_mtask_upstream_loc_conf_t;
 
 static ngx_command_t ngx_http_mtask_upstream_commands[] = {
 
-	/* TODO: add address & port here */
-
 	{	ngx_string("mtask_proxy_pass"),
-		NGX_HTTP_LOC_CONF|NGX_HTTP_LOC_CONF|NGX_CONF_NOARGS,
+		NGX_HTTP_LOC_CONF|NGX_HTTP_LOC_CONF|NGX_CONF_TAKE2,
 		ngx_http_mtask_upstream,
 		NGX_HTTP_LOC_CONF_OFFSET,
 		0,
@@ -53,30 +61,30 @@ static ngx_command_t ngx_http_mtask_upstream_commands[] = {
 /* Module context */
 static ngx_http_module_t ngx_http_mtask_upstream_module_ctx = {
 
-	NULL,                               /* preconfiguration */
-	NULL,                               /* postconfiguration */
-	NULL,                               /* create main configuration */
-	NULL,                               /* init main configuration */
-	NULL,                               /* create server configuration */
-	NULL,                               /* merge server configuration */
-	NULL,                               /* create location configuration */
-	NULL                                /* merge location configuration */
+	NULL,                                      /* preconfiguration */
+	NULL,                                      /* postconfiguration */
+	NULL,                                      /* create main configuration */
+	NULL,                                      /* init main configuration */
+	NULL,                                      /* create server configuration */
+	NULL,                                      /* merge server configuration */
+	ngx_http_mtask_upstream_create_loc_conf,   /* create location configuration */
+	ngx_http_mtask_upstream_merge_loc_conf     /* merge location configuration */
 };
 
 /* Module */
 ngx_module_t ngx_http_mtask_upstream_module = {
 
 	NGX_MODULE_V1,
-	&ngx_http_mtask_upstream_module_ctx,/* module context */
-	ngx_http_mtask_upstream_commands,   /* module directives */
-	NGX_HTTP_MODULE,                    /* module type */
-	NULL,                               /* init master */
-	NULL,                               /* init module */
-	NULL,                               /* init process */
-	NULL,                               /* init thread */
-	NULL,                               /* exit thread */
-	NULL,                               /* exit process */
-	NULL,                               /* exit master */
+	&ngx_http_mtask_upstream_module_ctx,       /* module context */
+	ngx_http_mtask_upstream_commands,          /* module directives */
+	NGX_HTTP_MODULE,                           /* module type */
+	NULL,                                      /* init master */
+	NULL,                                      /* init module */
+	NULL,                                      /* init process */
+	NULL,                                      /* init thread */
+	NULL,                                      /* exit thread */
+	NULL,                                      /* exit process */
+	NULL,                                      /* exit master */
 	NGX_MODULE_V1_PADDING
 };
 
@@ -88,17 +96,16 @@ ngx_int_t ngx_http_mtask_upstream_handler(ngx_http_request_t *r, ngx_chain_t *ou
 	struct sockaddr_in addr;
 	ssize_t sz;
 	ngx_buf_t *b;
+	ngx_http_mtask_upstream_loc_conf_t *mulcf;
+
+	mulcf = ngx_http_get_module_loc_conf(r, ngx_http_mtask_upstream_module);
 
 	s = socket(AF_INET, SOCK_STREAM, 0);
 
 	if (s == -1)
 		return NGX_ERROR;
 
-	addr.sin_family = AF_INET;
-	addr.sin_port = htons(1979);
-	addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-
-	if (connect(s, &addr, sizeof(addr)) == -1) {
+	if (connect(s, &mulcf->addr, sizeof(addr)) == -1) {
 
 		ngx_log_debug(NGX_LOG_DEBUG_HTTP, r->connection->log, 0, 
 			"mtask upstream connect() failed");
@@ -147,13 +154,72 @@ ngx_int_t ngx_http_mtask_upstream_handler(ngx_http_request_t *r, ngx_chain_t *ou
 	return NGX_OK;
 }
 
+static void* ngx_http_mtask_upstream_create_loc_conf(ngx_conf_t *cf)
+{
+	ngx_http_mtask_upstream_loc_conf_t *conf = ngx_pcalloc(cf->pool, 
+			sizeof(ngx_http_mtask_upstream_loc_conf_t));
+
+	return conf;
+}
+
+static char* ngx_http_mtask_upstream_merge_loc_conf(ngx_conf_t *cf, void *parent, void *child)
+{
+	ngx_http_mtask_upstream_loc_conf_t *prev = parent;
+	ngx_http_mtask_upstream_loc_conf_t *conf = child;
+
+	if (prev->addr.sin_port && !conf->addr.sin_port)
+		conf->addr = prev->addr;
+
+	return NGX_CONF_OK;
+}
+
+
 static char * ngx_http_mtask_upstream(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
 {
 	ngx_http_mtask_loc_conf_t *mlcf = conf;
+	ngx_http_mtask_upstream_loc_conf_t *mulcf;
+	ngx_str_t *value;
+	struct hostent *h;
+	char addr[16];
+	size_t n;
 
 	mlcf = ngx_http_conf_get_module_loc_conf(cf, ngx_http_mtask_module);
 
 	mlcf->handler = &ngx_http_mtask_upstream_handler;
+
+	mulcf = ngx_http_conf_get_module_loc_conf(cf, ngx_http_mtask_upstream_module);
+
+	value = cf->args->elts;
+
+	mulcf->addr.sin_family = AF_INET;
+	mulcf->addr.sin_port = htons(ngx_atoi(value[2].data, value[2].len));
+
+	if (value[1].len 
+			&& isdigit(value[1].data[value[1].len - 1])) {
+
+		/* ip */
+
+		n = value[1].len;
+		if (n > 15)
+			return "has bad long address";
+
+		strncpy(addr, (const char*)value[1].data, value[1].len);
+		addr[value[1].len] = 0;
+
+		if (!inet_aton(addr, &mulcf->addr.sin_addr))
+			return "has bad address";
+	
+	} else {
+
+		/* domain */
+
+		h = gethostbyname((const char*)value[1].data);
+
+		if (h == NULL)
+			return "failed ro resolve domain";
+
+		memcpy(&mulcf->addr.sin_addr, h->h_addr, h->h_length);
+	}
 
 	return NGX_CONF_OK;
 }
