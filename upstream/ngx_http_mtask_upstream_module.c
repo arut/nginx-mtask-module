@@ -35,7 +35,7 @@ OF SUCH DAMAGE.
 
 #include <ngx_http_mtask_module.h>
 
-static char * ngx_http_mtask_upstream(ngx_conf_t *cf, ngx_command_t *cmd, void *conf);
+static char* ngx_http_mtask_upstream(ngx_conf_t *cf, ngx_command_t *cmd, void *conf);
 static void* ngx_http_mtask_upstream_create_loc_conf(ngx_conf_t *cf);
 static char* ngx_http_mtask_upstream_merge_loc_conf(ngx_conf_t *cf, void *parent, void *child);
 
@@ -90,13 +90,14 @@ ngx_module_t ngx_http_mtask_upstream_module = {
 
 #define BUFSIZE 1024
 
-ngx_int_t ngx_http_mtask_upstream_handler(ngx_http_request_t *r, ngx_chain_t *out) {
+ngx_int_t ngx_http_mtask_upstream_handler(ngx_http_request_t *r, ngx_chain_t **out) {
 
 	int s;
 	struct sockaddr_in addr;
 	ssize_t sz;
 	ngx_buf_t *b;
 	ngx_http_mtask_upstream_loc_conf_t *mulcf;
+	ngx_chain_t *node;
 
 	mulcf = ngx_http_get_module_loc_conf(r, ngx_http_mtask_upstream_module);
 
@@ -115,12 +116,15 @@ ngx_int_t ngx_http_mtask_upstream_handler(ngx_http_request_t *r, ngx_chain_t *ou
 		return NGX_ERROR;
 	}
 
-	out->buf = ngx_create_temp_buf(r->pool, BUFSIZE);
-	out->next = NULL;
+	node = ngx_palloc(r->pool, sizeof(ngx_chain_t));
+	node->buf = ngx_create_temp_buf(r->pool, BUFSIZE);
+	node->next = NULL;
+
+	*out = node;
 
 	for(;;) {
 
-		b = out->buf;
+		b = node->buf;
 
 		sz = recv(s, b->last, b->end - b->last, 0);
 
@@ -140,16 +144,16 @@ ngx_int_t ngx_http_mtask_upstream_handler(ngx_http_request_t *r, ngx_chain_t *ou
 		b->last += sz;
 
 		if (b->last == b->end) {
-			out->next = (ngx_chain_t*)ngx_palloc(r->pool, sizeof(ngx_chain_t));
-			out = out->next;
-			out->next = NULL;
-			out->buf = ngx_create_temp_buf(r->pool, BUFSIZE);
+			node->next = (ngx_chain_t*)ngx_palloc(r->pool, sizeof(ngx_chain_t));
+			node = node->next;
+			node->next = NULL;
+			node->buf = ngx_create_temp_buf(r->pool, BUFSIZE);
 		}
 	}
 
 	close(s);
 
-	out->buf->last_buf = 1;
+	node->buf->last_buf = 1;
 
 	return NGX_OK;
 }

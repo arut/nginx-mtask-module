@@ -5,7 +5,7 @@
 #include <ngx_core.h>
 #include <ngx_http.h>
 
-typedef ngx_int_t (*ngx_http_mtask_handler_pt)(ngx_http_request_t*, ngx_chain_t*);
+typedef ngx_int_t (*ngx_http_mtask_handler_pt)(ngx_http_request_t*, ngx_chain_t**);
 
 struct ngx_http_mtask_loc_conf_s {
 

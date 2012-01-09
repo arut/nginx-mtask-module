@@ -135,34 +135,42 @@ static void mtask_start_scheduled() {
 	ngx_http_mtask_loc_conf_t *mlcf;
 	ngx_http_mtask_ctx_t *ctx;
 	ngx_http_request_t *r = mtask_current;
-	ngx_chain_t out;
+	ngx_chain_t *out;
 
 	ngx_log_debug(NGX_LOG_DEBUG_HTTP, mtask_current->connection->log, 0, 
 			"mtask start proc");
 
 	mlcf = ngx_http_get_module_loc_conf(r, ngx_http_mtask_module);
 
+	out = NULL;
+
 	if (mlcf->handler == NULL
 			|| mlcf->handler(r, &out) != NGX_OK)
 	{
 		r->err_status = NGX_HTTP_INTERNAL_SERVER_ERROR;
-		out.buf = ngx_create_temp_buf(r->pool, 1);
-		*out.buf->pos = '\n';
-		out.buf->last++;
-		out.next = NULL;
-		out.buf->last_buf = 1;
 	}
+
+	if (out == NULL) {
+		
+		out = ngx_palloc(r->pool, sizeof(ngx_chain_t));
+		out->buf = ngx_create_temp_buf(r->pool, 1);
+		*out->buf->pos = '\n';
+		out->buf->last++;
+		out->next = NULL;
+		out->buf->last_buf = 1;
+
+	}
+
+	ngx_log_debug(NGX_LOG_DEBUG_HTTP, mtask_current->connection->log, 0,
+			"mtask end proc");
 
 	mtask_resetcurrent();
 
 	ngx_http_send_header(r);
 
-	ngx_http_output_filter(r, &out);
+	ngx_http_output_filter(r, out);
 
 	ctx = ngx_http_get_module_ctx(r, ngx_http_mtask_module);
-
-	ngx_log_debug(NGX_LOG_DEBUG_HTTP, mtask_current->connection->log, 0, 
-			"mtask end proc");
 
 	setcontext(&ctx->rctx);
 }
@@ -171,7 +179,7 @@ static int mtask_wake(ngx_http_request_t *r, int flags) {
 
 	ngx_http_mtask_ctx_t *ctx;
 
-	ngx_log_debug(NGX_LOG_DEBUG_HTTP, r->connection->log, 0, 
+	ngx_log_debug(NGX_LOG_DEBUG_HTTP, r->connection->log, 0,
 			"mtask wake");
 
 	ctx = ngx_http_get_module_ctx(r, ngx_http_mtask_module);
