@@ -129,46 +129,58 @@ static ngx_http_request_t *mtask_req;
 
 #define mtask_scheduled (mtask_current != NULL)
 
-
-static void mtask_start_scheduled() {
+static void mtask_proc() {
 	
 	ngx_http_mtask_loc_conf_t *mlcf;
 	ngx_http_mtask_ctx_t *ctx;
 	ngx_http_request_t *r = mtask_current;
-	ngx_chain_t *out;
+	ngx_chain_t out;
+	ngx_connection_t *c;
 
 	ngx_log_debug(NGX_LOG_DEBUG_HTTP, mtask_current->connection->log, 0, 
-			"mtask start proc");
+			"mtask proc start");
 
 	mlcf = ngx_http_get_module_loc_conf(r, ngx_http_mtask_module);
 
-	out = NULL;
+	c = r->connection;
+
+	/* prevent flushing data to socket
+	   because we cannot use blocking syscalls
+	   which are intercepted to switch context */
+
+	c->write->delayed = 1;
 
 	if (mlcf->handler == NULL
-			|| mlcf->handler(r, &out) != NGX_OK)
+			|| mlcf->handler(r) != NGX_OK)
 	{
+		ngx_log_debug(NGX_LOG_DEBUG_HTTP, mtask_current->connection->log, 0,
+			"mtask proc error");
+
 		r->err_status = NGX_HTTP_INTERNAL_SERVER_ERROR;
-	}
-
-	if (out == NULL) {
 		
-		out = ngx_palloc(r->pool, sizeof(ngx_chain_t));
-		out->buf = ngx_create_temp_buf(r->pool, 1);
-		*out->buf->pos = '\n';
-		out->buf->last++;
-		out->next = NULL;
-		out->buf->last_buf = 1;
+		out.buf = ngx_create_temp_buf(r->pool, 1);
+		*out.buf->last++ = '\n';
+		out.next = NULL;
+		out.buf->last_buf = 1;
+
+		if (!r->header_sent)
+			ngx_http_send_header(r);
+
+		ngx_http_output_filter(r, &out);
+
+	} else {
+
+		ngx_log_debug(NGX_LOG_DEBUG_HTTP, mtask_current->connection->log, 0,
+			"mtask proc end");
 
 	}
 
-	ngx_log_debug(NGX_LOG_DEBUG_HTTP, mtask_current->connection->log, 0,
-			"mtask end proc");
+	c->write->delayed = 0;
 
 	mtask_resetcurrent();
 
-	ngx_http_send_header(r);
-
-	ngx_http_output_filter(r, out);
+	/* push data */
+	ngx_http_output_filter(r, NULL);
 
 	ctx = ngx_http_get_module_ctx(r, ngx_http_mtask_module);
 
@@ -303,9 +315,7 @@ static ngx_int_t ngx_http_mtask_handler(ngx_http_request_t *r) {
 	ctx->wctx.uc_stack.ss_flags = 0;
 	ctx->wctx.uc_link = NULL;
 
-	makecontext(&ctx->wctx, &mtask_start_scheduled, 0);
-
-	r->main->count++;
+	makecontext(&ctx->wctx, &mtask_proc, 0);
 
 	ngx_log_debug(NGX_LOG_DEBUG_HTTP, r->connection->log, 0, 
 			"mtask init");
@@ -317,6 +327,8 @@ static ngx_int_t ngx_http_mtask_handler(ngx_http_request_t *r) {
 
 		return NGX_OK;
 	}
+
+	r->main->count++;
 
 	ngx_log_debug(NGX_LOG_DEBUG_HTTP, r->connection->log, 0, 
 			"mtask detach");

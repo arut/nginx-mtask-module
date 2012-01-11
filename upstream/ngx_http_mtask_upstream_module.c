@@ -90,14 +90,14 @@ ngx_module_t ngx_http_mtask_upstream_module = {
 
 #define BUFSIZE 1024
 
-ngx_int_t ngx_http_mtask_upstream_handler(ngx_http_request_t *r, ngx_chain_t **out) {
+ngx_int_t ngx_http_mtask_upstream_handler(ngx_http_request_t *r) {
 
 	int s;
 	struct sockaddr_in addr;
 	ssize_t sz;
 	ngx_buf_t *b;
 	ngx_http_mtask_upstream_loc_conf_t *mulcf;
-	ngx_chain_t *node;
+	ngx_chain_t out;
 
 	mulcf = ngx_http_get_module_loc_conf(r, ngx_http_mtask_upstream_module);
 
@@ -116,15 +116,14 @@ ngx_int_t ngx_http_mtask_upstream_handler(ngx_http_request_t *r, ngx_chain_t **o
 		return NGX_ERROR;
 	}
 
-	node = ngx_palloc(r->pool, sizeof(ngx_chain_t));
-	node->buf = ngx_create_temp_buf(r->pool, BUFSIZE);
-	node->next = NULL;
+	ngx_http_send_header(r);
 
-	*out = node;
+	out.buf = ngx_create_temp_buf(r->pool, BUFSIZE);
+	out.next = NULL;
 
 	for(;;) {
 
-		b = node->buf;
+		b = out.buf;
 
 		sz = recv(s, b->last, b->end - b->last, 0);
 
@@ -144,16 +143,20 @@ ngx_int_t ngx_http_mtask_upstream_handler(ngx_http_request_t *r, ngx_chain_t **o
 		b->last += sz;
 
 		if (b->last == b->end) {
-			node->next = (ngx_chain_t*)ngx_palloc(r->pool, sizeof(ngx_chain_t));
-			node = node->next;
-			node->next = NULL;
-			node->buf = ngx_create_temp_buf(r->pool, BUFSIZE);
+
+			ngx_log_debug(NGX_LOG_DEBUG_HTTP, r->connection->log, 0, 
+					"mtask upstream writing %d bytes", b->last - b->pos);
+
+			ngx_http_output_filter(r, &out);
+
+			out.buf = ngx_create_temp_buf(r->pool, BUFSIZE);
 		}
 	}
 
 	close(s);
 
-	node->buf->last_buf = 1;
+	out.buf->last_buf = 1;
+	ngx_http_output_filter(r, &out);
 
 	return NGX_OK;
 }
