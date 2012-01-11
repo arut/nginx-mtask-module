@@ -39,7 +39,7 @@ OF SUCH DAMAGE.
 #include "ngx_http_mtask_module.h"
 
 /* NB: NGINX logger is greedy of stack; use > 4k for safety */
-#define MTASK_DEFAULT_STACK_SIZE 16384
+#define MTASK_DEFAULT_STACK_SIZE 65536
 
 #define MTASK_DEFAULT_TIMEOUT 10000
 
