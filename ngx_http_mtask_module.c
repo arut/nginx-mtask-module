@@ -190,6 +190,7 @@ static void mtask_proc() {
 static int mtask_wake(ngx_http_request_t *r, int flags) {
 
 	ngx_http_mtask_ctx_t *ctx;
+	ngx_connection_t *c;
 
 	ngx_log_debug(NGX_LOG_DEBUG_HTTP, r->connection->log, 0,
 			"mtask wake");
@@ -210,11 +211,14 @@ static int mtask_wake(ngx_http_request_t *r, int flags) {
 
 		if (!(flags & MTASK_WAKE_NOFINALIZE)) {
 
+			c = r->connection;
+
 			ngx_http_finalize_request(r, NGX_OK);
 
 			/* we need this if this is subrequest 
 			   to continue parent request */
-			ngx_http_run_posted_requests(r->connection);
+
+			ngx_http_run_posted_requests(c);
 		}
 
 		return 1;
@@ -247,9 +251,6 @@ static void mtask_event_handler(ngx_event_t *ev) {
 	}
 
 	mtask_wake(r, wf);
-
-	ngx_log_debug(NGX_LOG_DEBUG_HTTP, r->connection->log, 0, 
-			"mtask event done");
 }
 
 /* returns 1 on timeout */
