@@ -137,7 +137,7 @@ static void mtask_proc() {
 	ngx_chain_t out;
 	ngx_connection_t *c;
 
-	ngx_log_debug(NGX_LOG_DEBUG_HTTP, mtask_current->connection->log, 0, 
+	ngx_log_debug0(NGX_LOG_DEBUG_HTTP, mtask_current->connection->log, 0, 
 			"mtask proc start");
 
 	mlcf = ngx_http_get_module_loc_conf(r, ngx_http_mtask_module);
@@ -153,7 +153,7 @@ static void mtask_proc() {
 	if (mlcf->handler == NULL
 			|| mlcf->handler(r) != NGX_OK)
 	{
-		ngx_log_debug(NGX_LOG_DEBUG_HTTP, mtask_current->connection->log, 0,
+		ngx_log_error(NGX_LOG_ALERT, mtask_current->connection->log, 0,
 			"mtask proc error");
 
 		r->err_status = NGX_HTTP_INTERNAL_SERVER_ERROR;
@@ -170,7 +170,7 @@ static void mtask_proc() {
 
 	} else {
 
-		ngx_log_debug(NGX_LOG_DEBUG_HTTP, mtask_current->connection->log, 0,
+		ngx_log_debug0(NGX_LOG_DEBUG_HTTP, mtask_current->connection->log, 0,
 			"mtask proc end");
 
 	}
@@ -192,7 +192,7 @@ static int mtask_wake(ngx_http_request_t *r, int flags) {
 	ngx_http_mtask_ctx_t *ctx;
 	ngx_connection_t *c;
 
-	ngx_log_debug(NGX_LOG_DEBUG_HTTP, r->connection->log, 0,
+	ngx_log_debug0(NGX_LOG_DEBUG_HTTP, r->connection->log, 0,
 			"mtask wake");
 
 	ctx = ngx_http_get_module_ctx(r, ngx_http_mtask_module);
@@ -206,7 +206,7 @@ static int mtask_wake(ngx_http_request_t *r, int flags) {
 
 	if (!mtask_scheduled) {
 
-		ngx_log_debug(NGX_LOG_DEBUG_HTTP, r->connection->log, 0, 
+		ngx_log_debug0(NGX_LOG_DEBUG_HTTP, r->connection->log, 0, 
 			"mtask finalize");
 
 		if (!(flags & MTASK_WAKE_NOFINALIZE)) {
@@ -239,12 +239,12 @@ static void mtask_event_handler(ngx_event_t *ev) {
 
 	r = c->data;
 
-	ngx_log_debug(NGX_LOG_DEBUG_HTTP, r->connection->log, 0, 
+	ngx_log_debug0(NGX_LOG_DEBUG_HTTP, r->connection->log, 0, 
 			"mtask event");
 
 	if (ev->timedout) {
 		
-		ngx_log_debug(NGX_LOG_DEBUG_HTTP, r->connection->log, 0, 
+		ngx_log_debug0(NGX_LOG_DEBUG_HTTP, r->connection->log, 0, 
 			"mtask timeout");
 
 		wf |= MTASK_WAKE_TIMEDOUT;
@@ -263,7 +263,7 @@ static int mtask_yield(int fd, ngx_int_t event) {
 
 	mlcf = ngx_http_get_module_loc_conf(mtask_current, ngx_http_mtask_module);
 
-	ngx_log_debug(NGX_LOG_DEBUG_HTTP, mtask_current->connection->log, 0, 
+	ngx_log_debug2(NGX_LOG_DEBUG_HTTP, mtask_current->connection->log, 0, 
 			"mtask yield '%V' (%s)", 
 			&mtask_current->uri,
 			event & NGX_WRITE_EVENT ? "write" : "read");
@@ -327,12 +327,12 @@ static ngx_int_t ngx_http_mtask_handler(ngx_http_request_t *r) {
 
 	makecontext(&ctx->wctx, &mtask_proc, 0);
 
-	ngx_log_debug(NGX_LOG_DEBUG_HTTP, r->connection->log, 0, 
+	ngx_log_debug0(NGX_LOG_DEBUG_HTTP, r->connection->log, 0, 
 			"mtask init");
 
 	if (mtask_wake(r, MTASK_WAKE_NOFINALIZE)) {
 
-		ngx_log_debug(NGX_LOG_DEBUG_HTTP, r->connection->log, 0, 
+		ngx_log_debug0(NGX_LOG_DEBUG_HTTP, r->connection->log, 0, 
 			"mtask fast result");
 
 		return NGX_OK;
@@ -340,7 +340,7 @@ static ngx_int_t ngx_http_mtask_handler(ngx_http_request_t *r) {
 
 	r->main->count++;
 
-	ngx_log_debug(NGX_LOG_DEBUG_HTTP, r->connection->log, 0, 
+	ngx_log_debug0(NGX_LOG_DEBUG_HTTP, r->connection->log, 0, 
 			"mtask detach");
 
 	return NGX_DONE;
