@@ -521,7 +521,7 @@ static poll_pt orig_poll;
 
 int poll(struct pollfd *fds, nfds_t nfds, int timeout) {
 
-	return mtask_scheduled
+	return mtask_scheduled && timeout
 		? (int)nfds /* always ready! */
 		: orig_poll(fds, nfds, timeout);
 }
