@@ -134,7 +134,6 @@ static void mtask_proc() {
 	ngx_http_mtask_loc_conf_t *mlcf;
 	ngx_http_mtask_ctx_t *ctx;
 	ngx_http_request_t *r = mtask_current;
-	ngx_chain_t out;
 	ngx_connection_t *c;
 
 	ngx_log_debug0(NGX_LOG_DEBUG_HTTP, mtask_current->connection->log, 0, 
@@ -156,17 +155,11 @@ static void mtask_proc() {
 		ngx_log_error(NGX_LOG_ALERT, mtask_current->connection->log, 0,
 			"mtask proc error");
 
-		r->err_status = NGX_HTTP_INTERNAL_SERVER_ERROR;
-		
-		out.buf = ngx_create_temp_buf(r->pool, 1);
-		*out.buf->last++ = '\n';
-		out.next = NULL;
-		out.buf->last_buf = 1;
+		r->headers_out.status = NGX_HTTP_INTERNAL_SERVER_ERROR;
+		r->header_only = 1;
+		r->headers_out.content_length_n = 0;
 
-		if (!r->header_sent)
-			ngx_http_send_header(r);
-
-		ngx_http_output_filter(r, &out);
+		ngx_http_send_header(r);
 
 	} else {
 
